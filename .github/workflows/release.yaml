@@ -51,6 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: create-github-release # Depends on release being created
     permissions:
+      contents: read # Needs read access for checkout
       packages: write # To push Docker images to GitHub Packages
     
     steps:
@@ -86,6 +87,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: create-github-release # Depends on release being created
     permissions:
+      contents: read # Needs read access for checkout
       contents: write # To upload assets to the release
 
     strategy:
