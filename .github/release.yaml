@@ -1,0 +1,123 @@
+name: Release Go JWT Issuer
+
+on:
+  push:
+    branches:
+      - main # Trigger on push to main for development/latest builds
+    tags:
+      - 'v*.*.*' # Trigger on new tags (e.g., v1.0.0) for releases
+
+jobs:
+  # Job 1: Build and Push Multi-arch Docker Image
+  build-docker-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed for creating releases later
+      packages: write # To push Docker images to GitHub Packages (important for GHCR)
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU (for multi-arch Docker build)
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to GitHub Container Registry (GHCR)
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io # Specify GHCR registry
+        username: ${{ github.actor }} # Use GitHub actor (your username)
+        password: ${{ secrets.GITHUB_TOKEN }} # Use the built-in GITHUB_TOKEN for GHCR auth
+
+    - name: Get tag or short SHA
+      id: get_version
+      run: |
+        VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo ${{ github.sha }} | cut -c1-8)
+        echo "BUILD_VERSION=$VERSION" >> $GITHUB_ENV
+        # Derive repo name for GHCR tags
+        REPO_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+        echo "GHCR_REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
+
+    - name: Build and Push Multi-arch Docker Image to GHCR
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository_owner }}/${{ env.GHCR_REPO_NAME }}:latest # OWNER/REPO_NAME:latest
+          ghcr.io/${{ github.repository_owner }}/${{ env.GHCR_REPO_NAME }}:${{ env.BUILD_VERSION }} # OWNER/REPO_NAME:version
+
+    - name: Create GitHub Release (only if tag pushed)
+      if: startsWith(github.ref, 'refs/tags/v')
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        name: Release ${{ github.ref }}
+        body: |
+          Automated release for ${{ github.ref }}
+          
+          Assets include multi-architecture Docker images and CLI binaries.
+        draft: false
+        prerelease: false
+        # generate_release_notes: true # Uncomment to auto-generate release notes
+
+  # Job 2: Build and Upload Binaries for All Platforms (Matrix)
+  build-binaries:
+    runs-on: ${{ matrix.os }}
+    needs: build-docker-image
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+
+    - name: Build Binary (${{ matrix.goos }}/${{ matrix.goarch }})
+      run: |
+        CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o custom-jwt-issuer-${{ matrix.goos }}-${{ matrix.goarch }} .
+      working-directory: ./
+
+    - name: Upload Binary Asset (${{ matrix.goos }}/${{ matrix.goarch }})
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.build-docker-image.outputs.upload_url }}
+        asset_path: ./custom-jwt-issuer-${{ matrix.goos }}-${{ matrix.goarch }}
+        asset_name: custom-jwt-issuer-${{ matrix.goos }}-${{ matrix.goarch }}
+        asset_content_type: application/octet-stream
