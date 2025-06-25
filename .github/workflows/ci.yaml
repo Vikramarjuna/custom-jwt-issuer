@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ master ]
+  push:
+    branches: [ master ]
+
+jobs:
+  build-test-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install linters
+        run: |
+          go install golang.org/x/lint/golint@latest
+
+      - name: Build
+        run: make build
+
+      - name: Run tests with coverage
+        run: make cover
+
+      - name: Save current coverage
+        run: |
+          go test -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | grep total: | awk '{print $3}' | sed 's/%//' > coverage.txt
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.txt
+
+      - name: Download previous coverage artifact
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: ci.yaml
+          name: coverage
+          path: prev_coverage
+          run_id: ${{ github.event.pull_request.base.sha }}
+        continue-on-error: true
+
+      - name: Compare coverage with previous
+        if: github.event_name == 'pull_request'
+        run: |
+          prev_cov=0
+          if [ -f prev_coverage/coverage.txt ]; then
+            prev_cov=$(cat prev_coverage/coverage.txt)
+          fi
+          curr_cov=$(cat coverage.txt)
+          echo "Previous coverage: $prev_cov%"
+          echo "Current coverage: $curr_cov%"
+          awk -v curr="$curr_cov" -v prev="$prev_cov" 'BEGIN { if (curr+0 < prev+0) { exit 1 } }'
+        shell: bash

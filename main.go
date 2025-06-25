@@ -107,7 +107,7 @@ func generateKeys(privateKeyFile, publicKeyFile string) {
 	var err error
 	privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		log.Fatalf("Failed to generate private key: %v", err)
+		fatalf("Failed to generate private key: %v", err)
 	}
 	publicKey = &privateKey.PublicKey
 	log.Println("Key pair generated.")
@@ -118,21 +118,21 @@ func generateKeys(privateKeyFile, publicKeyFile string) {
 		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
 	}
 	if err := os.WriteFile(privateKeyFile, pem.EncodeToMemory(privatePEM), 0600); err != nil {
-		log.Fatalf("Failed to write private key: %v", err)
+		fatalf("Failed to write private key: %v", err)
 	}
 	log.Printf("Private key saved to %s", privateKeyFile)
 
 	// Save public key to PEM
 	publicASN1, err := x509.MarshalPKIXPublicKey(publicKey)
 	if err != nil {
-		log.Fatalf("Failed to marshal public key: %v", err)
+		fatalf("Failed to marshal public key: %v", err)
 	}
 	publicPEM := &pem.Block{
 		Type:  "PUBLIC KEY", // Use "PUBLIC KEY" for PKIX, not "RSA PUBLIC KEY" for PKCS1
 		Bytes: publicASN1,
 	}
 	if err := os.WriteFile(publicKeyFile, pem.EncodeToMemory(publicPEM), 0644); err != nil {
-		log.Fatalf("Failed to write public key: %v", err)
+		fatalf("Failed to write public key: %v", err)
 	}
 	log.Printf("Public key saved to %s", publicKeyFile)
 
@@ -143,7 +143,7 @@ func generateKeys(privateKeyFile, publicKeyFile string) {
 // generateJWKS populates the global jwksSet using the loaded publicKey.
 func generateJWKS() {
 	if publicKey == nil {
-		log.Fatal("Public key not loaded, cannot generate JWKS.")
+		fatal("Public key not loaded, cannot generate JWKS.")
 	}
 
 	// Convert public key to JWK components
@@ -166,7 +166,7 @@ func generateJWKS() {
 
 	jwksJSON, err := json.MarshalIndent(jwksSet, "", "  ")
 	if err != nil {
-		log.Fatalf("Failed to marshal JWKS: %v", err)
+		fatalf("Failed to marshal JWKS: %v", err)
 	}
 	log.Println("\n--- JWKS Public Key JSON (for review) ---")
 	fmt.Println(string(jwksJSON))
@@ -182,16 +182,15 @@ func generateJWKS() {
 }
 
 // loadPrivateKey loads an RSA private key from a PEM file.
-func loadPrivateKey(privateKeyFile string) {
-	//log.Printf("Loading private key from %s", privateKeyFile)
+func loadPrivateKey(privateKeyFile string) error {
 	keyBytes, err := os.ReadFile(privateKeyFile)
 	if err != nil {
-		log.Fatalf("Failed to read private key file: %v", err)
+		return fmt.Errorf("failed to read private key file: %w", err)
 	}
 
 	block, _ := pem.Decode(keyBytes)
 	if block == nil {
-		log.Fatal("Failed to decode PEM block containing private key")
+		return fmt.Errorf("failed to decode PEM block containing private key")
 	}
 
 	// Try parsing PKCS1 or PKCS8 private key
@@ -199,19 +198,18 @@ func loadPrivateKey(privateKeyFile string) {
 	if err != nil {
 		parsedKey_pkcs8, err_pkcs8 := x509.ParsePKCS8PrivateKey(block.Bytes)
 		if err_pkcs8 != nil {
-			log.Fatalf("Failed to parse private key: %v (PKCS1) / %v (PKCS8)", err, err_pkcs8)
+			return fmt.Errorf("failed to parse private key: %v (PKCS1) / %v (PKCS8)", err, err_pkcs8)
 		}
 		var ok bool
 		privateKey, ok = parsedKey_pkcs8.(*rsa.PrivateKey)
 		if !ok {
-			log.Fatalf("Private key is not RSA: %T", parsedKey_pkcs8)
+			return fmt.Errorf("private key is not RSA: %T", parsedKey_pkcs8)
 		}
 	} else {
 		privateKey = parsedKey
 	}
 	publicKey = &privateKey.PublicKey // Derive public key
-	//log.Println("Private key loaded successfully.")
-	// generateJWKS() // Only generate JWKS when explicitly running generate-keys, not on every load
+	return nil
 }
 
 // bigIntToBytes converts a *big.Int to a byte slice suitable for base64url encoding.
@@ -436,6 +434,10 @@ func handleRefreshJWKS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Testable fatal error handlers
+var fatalf = log.Fatalf
+var fatal = log.Fatal
+
 // main handles CLI commands or starts the HTTP server.
 func main() {
 	// Parse CLI arguments
@@ -459,28 +461,26 @@ func main() {
 
 			// Determine if private key file path is explicitly provided
 			if len(os.Args) >= 3 {
-				// If the third argument looks like a file path (e.g., doesn't start with '{' or '[')
-				// Assume it's the private key file path. Otherwise, assume default path and it's the payload.
 				if !strings.HasPrefix(os.Args[2], "{") && !strings.HasPrefix(os.Args[2], "[") {
 					privateKeyFile = os.Args[2]
 				} else {
-					// Argument 2 is likely the payload string, so use default private key file
 					payloadStr = os.Args[2]
 				}
 			}
-			// If there's a fourth argument, it must be the payload string
 			if len(os.Args) >= 4 {
 				payloadStr = os.Args[3]
 			}
-			if len(os.Args) > 4 { // Too many arguments
-				log.Fatal("Usage: go run main.go generate-jwt [private_key_file] [payload_json_string]")
+			if len(os.Args) > 4 {
+				fatal("Usage: go run main.go generate-jwt [private_key_file] [payload_json_string]")
 			}
 
-			loadPrivateKey(privateKeyFile) // Load the private key to sign
+			if err := loadPrivateKey(privateKeyFile); err != nil {
+				fatalf("%v", err)
+			}
 
 			var customClaims map[string]interface{}
 			if err := json.Unmarshal([]byte(payloadStr), &customClaims); err != nil {
-				log.Fatalf("Invalid payload JSON: %v", err)
+				fatalf("Invalid payload JSON: %v", err)
 			}
 
 			// Prepare claims, using global defaults unless overridden by customClaims
@@ -537,7 +537,7 @@ func main() {
 
 			signedToken, err := token.SignedString(privateKey)
 			if err != nil {
-				log.Fatalf("Failed to sign token: %v", err)
+				fatalf("Failed to sign token: %v", err)
 			}
 			fmt.Println(signedToken)
 			return
@@ -548,7 +548,9 @@ func main() {
 
 	// HTTP server mode
 	log.Println("Starting HTTP server...")
-	loadPrivateKey(PRIVATE_KEY_FILE) // Load private key when starting server
+	if err := loadPrivateKey(PRIVATE_KEY_FILE); err != nil {
+		fatalf("%v", err)
+	}
 
 	http.HandleFunc("/jwks", handleJWKS)
 	http.HandleFunc("/token", handleToken)
@@ -556,5 +558,5 @@ func main() {
 	http.HandleFunc("/refresh-jwks", handleRefreshJWKS)
 
 	log.Printf("Listening on :%s", listenPort)
-	log.Fatal(http.ListenAndServe(":"+listenPort, nil))
+	fatal(http.ListenAndServe(":"+listenPort, nil))
 }
