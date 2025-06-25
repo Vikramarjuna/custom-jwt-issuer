@@ -1,0 +1,98 @@
+# custom-jwt-issuer-k8s.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jwt-issuer # Dedicated namespace for your custom issuer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: custom-jwt-sa
+  namespace: jwt-issuer
+---
+# IMPORTANT: This secret holds your PRIVATE KEY. Handle with extreme care.
+# You must create this secret *before* deploying the application if using 'data'.
+#
+# Option A (Recommended): Create manually from your local private_key.pem file:
+# kubectl create secret generic custom-jwt-private-key --from-file=private_key.pem=<PATH_TO_YOUR_LOCAL_private_key.pem> -n jwt-issuer
+#
+# Option B (For quick testing/demo, less secure for production): Embed content directly here.
+# stringData is for plain text. Use 'data' with base64 encoded value for production.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: custom-jwt-private-key
+  namespace: jwt-issuer
+type: Opaque
+stringData:
+  private_key.pem: |
+    -----BEGIN RSA PRIVATE KEY-----
+    # PASTE THE ENTIRE CONTENT OF YOUR private_key.pem FILE HERE
+    # ENSURE CORRECT YAML INDENTATION FOR MULTI-LINE STRING.
+    # Example (DO NOT USE THIS - GET YOUR REAL PRIVATE KEY):
+    MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCjknN/LTKuPvXU
+    bvLvyAwIs7I189CC+JErIOWwYzE1zRRLn7zNbG+UQJFqVorWm/84OqX/iC9HYudo
+    ... # YOUR ACTUAL PRIVATE KEY CONTENT FROM private_key.pem
+    -----END RSA PRIVATE KEY-----
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: custom-jwt-issuer
+  namespace: jwt-issuer
+  labels:
+    app: custom-jwt-issuer
+spec:
+  replicas: 1 # Start with 1, scale as needed
+  selector:
+    matchLabels:
+      app: custom-jwt-issuer
+  template:
+    metadata:
+      labels:
+        app: custom-jwt-issuer
+    spec:
+      serviceAccountName: custom-jwt-sa
+      containers:
+      - name: app
+        image: your-docker-repo/custom-jwt-issuer:your-tag # <--- IMPORTANT: REPLACE WITH YOUR BUILT IMAGE
+        ports:
+        - containerPort: 8080
+        env:
+        - name: LISTEN_PORT # Matches the default in app.go, but explicit is good
+          value: "8080"
+        - name: JWT_ISSUER # <--- IMPORTANT: This MUST match your JWTProvider's issuer string
+          value: "https://my-go-issuer.example.com" # Example, update with your choice
+        - name: JWT_AUDIENCE # <--- IMPORTANT: This MUST match your RouteAuthFilter's audience string
+          value: "your-api-audience" # Example, update with your choice
+        - name: JWKS_ALG # <--- IMPORTANT: This MUST match the algorithm used for signing (e.g., RS512)
+          value: "RS512" # Example, update with your actual ALG from key generation
+        - name: JWKS_KID # <--- IMPORTANT: This MUST match the Key ID used for signing
+          value: "YOUR_GENERATED_KID" # Paste the KID from your generate_keys_and_jwks.py output
+        volumeMounts:
+        - name: private-key-volume
+          mountPath: /app/private_key.pem # Mount point for the private key file
+          subPath: private_key.pem # Mount only the specific file from the secret
+          readOnly: true
+      volumes:
+      - name: private-key-volume
+        secret:
+          secretName: custom-jwt-private-key # Name of the secret created above
+          defaultMode: 0400 # Read-only for owner (secure)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: custom-jwt-issuer
+  namespace: jwt-issuer
+  labels:
+    app: custom-jwt-issuer
+spec:
+  selector:
+    app: custom-jwt-issuer
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP # Internal cluster IP is sufficient
