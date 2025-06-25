@@ -98,10 +98,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        goos: [linux, darwin]
-        goarch: [amd64, arm64]
-        include:
+        include: # Only list the specific combinations you want to run
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
