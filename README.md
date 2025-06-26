@@ -1,11 +1,11 @@
-# Go JWT Issuer Application
+# Custom JWT Issuer Application
 
 This application is a simple, customizable JSON Web Token (JWT) issuer built in Go. It can be used as a command-line utility for key generation and token signing, or deployed as an HTTP server to provide JWKS (JSON Web Key Set) and on-demand JWT issuance. It's ideal for development, testing, and demonstrating JWT authentication flows.
 
 ## Features
 
 - **RSA Key Pair Generation:** Generate a private key (for signing) and its corresponding public key (for verification) locally.
-- **JWKS Endpoint:** Serves the public key in standard JWKS format (`/.well-known/jwks.json`).
+- **JWKS Endpoint:** Serves the public key in standard JWKS format (`jwks`).
 - **JWT Generation Endpoint:** Accepts `POST` requests with custom claims to issue signed JWTs.
 - **JWT Verification Endpoint:** Accepts `POST` requests with JWTs in the Authorization header to verify their validity and decode their contents, similar to `jwt.io`.
 - **Configurable:** Key parameters (Issuer, Audience, Algorithm, Key ID, Listen Port) are configurable via environment variables.
@@ -119,11 +119,11 @@ Once the application is running (either locally in Docker or in Kubernetes), you
 
 - **If running locally in Docker:**
   ```sh
-  curl http://localhost:8080/.well-known/jwks.json
+  curl http://localhost:8080/jwks
   ```
 - **If running in Kubernetes (from within the cluster, e.g., a debug pod):**
   ```sh
-  kubectl exec -it <YOUR_DEBUG_POD_NAME> -n <YOUR_DEBUG_POD_NAMESPACE> -- curl http://custom-jwt-issuer.jwt-issuer.svc.cluster.local:8080/.well-known/jwks.json
+  kubectl exec -it <YOUR_DEBUG_POD_NAME> -n <YOUR_DEBUG_POD_NAMESPACE> -- curl http://custom-jwt-issuer.jwt-issuer.svc.cluster.local:8080/jwks
   ```
 - You should see the JWKS JSON output.
 
@@ -162,6 +162,20 @@ This endpoint allows you to verify a JWT's signature and decode its contents.
        http://custom-jwt-issuer.jwt-issuer.svc.cluster.local:8080/verify-jwt
   ```
 - This will return a JSON object showing `isValid: true` and the decoded header/payload, or `isValid: false` with an error message.
+
+### 4. Refresh JWKS Endpoint (`/refresh-jwks`)
+
+This endpoint allows you to refresh the JWKS served by the application, for example after rotating keys. It will regenerate the JWKS based on the current loaded public key and configuration.
+
+- **If running locally in Docker:**
+  ```sh
+  curl -X POST http://localhost:8080/refresh-jwks
+  ```
+- **If running in Kubernetes (from within the cluster):**
+  ```sh
+  kubectl exec -it <YOUR_DEBUG_POD_NAME> -n <YOUR_DEBUG_POD_NAMESPACE> -- curl -X POST http://custom-jwt-issuer.jwt-issuer.svc.cluster.local:8080/refresh-jwks
+  ```
+- The response will be a JSON object confirming the refresh and showing the current `kid` and `alg`.
 
 ---
 
