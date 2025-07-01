@@ -218,4 +218,4 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         # Use gh cli to edit the release body
-        gh release edit "${{ github.ref_name }}" --body-file FINAL_RELEASE_BODY.md
+        gh release edit "${{ github.ref_name }}" --notes-file FINAL_RELEASE_BODY.md
