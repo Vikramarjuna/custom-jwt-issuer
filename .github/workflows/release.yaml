@@ -5,57 +5,16 @@ on:
     tags:
       - 'v*.*.*' # Trigger on new tags (e.g., v1.0.0) for releases
 
-# TOP-LEVEL PERMISSIONS for all jobs (unless overridden)
-permissions:
-  contents: read # Allow reading repository content for checkout
-  packages: write # To push Docker images (if GHCR is used)
-  # contents: write is needed for creating releases later in 'create-github-release' job,
-  # which explicitly sets it.
-
 jobs:
-  # Job 1: Get Version and Create GitHub Release (if tag pushed)
-  create-github-release:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write # Needs write permission to create release and upload assets
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }} # Output the upload URL
-      build_version: ${{ steps.get_version.outputs.BUILD_VERSION }} # Output BUILD_VERSION from get_version step
-      lower_repo_path: ${{ steps.get_version.outputs.LOWER_REPO_PATH }} # Output LOWER_REPO_PATH from get_version step
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4 # This step needs read access
-
-    - name: Get tag or short SHA
-      id: get_version # Assign an ID to this step to reference its outputs
-      run: |
-        VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo ${{ github.sha }} | cut -c1-8)
-        echo "BUILD_VERSION=$VERSION" >> $GITHUB_OUTPUT # Use GITHUB_OUTPUT to make it an output
-        LOWER_REPO_PATH=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-        echo "LOWER_REPO_PATH=$LOWER_REPO_PATH" >> $GITHUB_OUTPUT # Use GITHUB_OUTPUT to make it an output
-
-    - name: Generate Release Body
-      if: startsWith(github.ref, 'refs/tags/v')
-      run: |
-        echo -e "Automated release for version ${{ steps.get_version.outputs.BUILD_VERSION }}.\n\n" > RELEASE_BODY.md
-        echo -e "This release includes:\n" >> RELEASE_BODY.md
-        echo -e "* Multi-architecture Docker images (Linux/amd64, Linux/arm64) pushed to GitHub Container Registry.\n" >> RELEASE_BODY.md
-        echo -e "* CLI binaries for Linux (amd64, arm64) and macOS (amd64, arm64) attached as assets.\n" >> RELEASE_BODY.md
-        echo -e "\nFor detailed changes, please refer to the commit history." >> RELEASE_BODY.md
-
-        body_path: README.md
-        draft: false
-        prerelease: false
-
-  # Job 2: Build and Push Multi-arch Docker Image (runs in parallel with build-binaries)
+  # Job 1: Build and Push Multi-arch Docker Image
   build-docker-image:
     runs-on: ubuntu-latest
-    needs: create-github-release # Depends on release being created
     permissions:
-      contents: read # Needs read access for checkout (for Dockerfile context)
-      packages: write # To push Docker images to GitHub Packages
-    
+      packages: write # To push Docker images to GitHub Packages (important for GHCR)
+      contents: read # Only read permission needed here, as it's not creating release
+    outputs:
+      build_version: ${{ steps.get_version.outputs.BUILD_VERSION }} # Output version for later use
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -69,9 +28,17 @@ jobs:
     - name: Login to GitHub Container Registry (GHCR)
       uses: docker/login-action@v3
       with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        registry: ghcr.io # Specify GHCR registry
+        username: ${{ github.actor }} # Use GitHub actor (your username)
+        password: ${{ secrets.GITHUB_TOKEN }} # Use the built-in GITHUB_TOKEN for GHCR auth
+
+    - name: Get tag or short SHA
+      id: get_version
+      run: |
+        # Get the tag name from github.ref, removing "refs/tags/" prefix
+        TAG_NAME=$(echo "${{ github.ref }}" | sed 's/^refs\/tags\///')
+        echo "BUILD_VERSION=$TAG_NAME" >> $GITHUB_ENV
+        echo "BUILD_VERSION=$TAG_NAME" >> "$GITHUB_OUTPUT" # Output for job output
 
     - name: Build and Push Multi-arch Docker Image to GHCR
       uses: docker/build-push-action@v5
@@ -79,33 +46,47 @@ jobs:
         context: .
         platforms: linux/amd64,linux/arm64
         push: true
+        # Use github.repository which already includes owner/repo-name
         tags: |
-          ghcr.io/${{ needs.create-github-release.outputs.lower_repo_path }}:latest
-          ghcr.io/${{ needs.create-github-release.outputs.lower_repo_path }}:${{ needs.create-github-release.outputs.build_version }}
-              
-  # Job 3: Build and Upload Binaries for All Platforms (Matrix, runs in parallel with build-docker-image)
+          ghcr.io/${{ github.repository }}:latest
+          ghcr.io/${{ github.repository }}:${{ env.BUILD_VERSION }}
+          ghcr.io/${{ github.repository }}:${{ github.sha }} # Optionally push with full SHA as well
+
+  # Job 2: Build and Upload Binaries for All Platforms (Matrix) as artifacts
   build-binaries:
     runs-on: ${{ matrix.os }}
-    needs: create-github-release # Depends on release being created
+    needs: build-docker-image # Ensure docker image build starts before or concurrently
     permissions:
-      contents: write # To upload assets to the release
+      contents: read # Only read permission needed, we'll upload artifacts
 
     strategy:
-      fail-fast: false
+      fail-fast: false # Allow all matrix jobs to complete even if one fails
       matrix:
-        include: # Only list the specific combinations you want to run
+        os: [ubuntu-latest, macos-latest]
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+        # Include specific combinations to avoid redundant builds (e.g., darwin/amd64 on ubuntu)
+        # Note: macOS runners can build darwin/amd64 and darwin/arm64.
+        # Linux runners can build linux/amd64 and linux/arm64.
+        # Cross-compiling for macOS on Linux or vice-versa requires more complex toolchains
+        # so it's best to build on native OS where possible for host OS targets.
+        include:
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
+            asset_name_suffix: linux-amd64
           - os: ubuntu-latest
             goos: linux
             goarch: arm64
+            asset_name_suffix: linux-arm64
           - os: macos-latest
             goos: darwin
             goarch: amd64
+            asset_name_suffix: darwin-amd64
           - os: macos-latest
             goos: darwin
             goarch: arm64
+            asset_name_suffix: darwin-arm64
 
     steps:
     - name: Checkout code
@@ -118,16 +99,62 @@ jobs:
 
     - name: Build Binary (${{ matrix.goos }}/${{ matrix.goarch }})
       run: |
-        CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o custom-jwt-issuer-${{ matrix.goos }}-${{ matrix.goarch }} .
+        BINARY_NAME="custom-jwt-issuer-${{ matrix.asset_name_suffix }}"
+        # For macOS arm64 (Apple Silicon), need to set GOARCH to arm64 and build on macos-latest
+        CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o $BINARY_NAME .
+        echo "Built $BINARY_NAME"
       working-directory: ./
 
-    - name: Upload Binary Asset (${{ matrix.goos }}/${{ matrix.goarch }})
-      if: startsWith(github.ref, 'refs/tags/v') # Only upload if a tag pushed
-      uses: actions/upload-release-asset@v1
+    - name: Upload Binary as Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: custom-jwt-issuer-${{ matrix.asset_name_suffix }} # Unique name for each artifact
+        path: ./custom-jwt-issuer-${{ matrix.asset_name_suffix }}
+        # Retention days can be set to save space, default is 90 days.
+        retention-days: 7
+
+  # Job 3: Create GitHub Release and Upload Assets
+  create-github-release:
+    runs-on: ubuntu-latest
+    needs: [build-docker-image, build-binaries] # This job depends on both previous jobs finishing
+    permissions:
+      contents: write # Required to create/update releases
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4 # Needed for access to RELEASE_BODY.md if you choose to create it
+
+    - name: Download all Binary Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./release_assets # All artifacts will be downloaded into this directory
+
+    - name: List Downloaded Artifacts (for debugging)
+      run: ls -R ./release_assets
+
+    - name: Generate Release Body
+      id: generate_body
+      run: |
+        RELEASE_TAG="${{ github.ref_name }}" # e.g., v0.0.3
+        echo "Automated release for version $RELEASE_TAG." > RELEASE_BODY.md
+        echo "" >> RELEASE_BODY.md
+        echo "This release includes:" >> RELEASE_BODY.md
+        echo "* Multi-architecture Docker images (Linux/amd64, Linux/arm64) pushed to GitHub Container Registry." >> RELEASE_BODY.md
+        echo "* CLI binaries for Linux (amd64, arm64) and macOS (amd64, arm64) attached as assets." >> RELEASE_BODY.md
+        echo "" >> RELEASE_BODY.md
+        echo "For detailed changes, please refer to the commit history." >> RELEASE_BODY.md
+      # The shell parameter from your original error is unnecessary here for simple echo commands
+      # shell: /usr/bin/bash -e {0} # This line was the root cause of your initial error
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2 # Use v2 for better features and maintenance
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        upload_url: ${{ needs.create-github-release.outputs.upload_url }} # Get URL from create-release job
-        asset_path: ./custom-jwt-issuer-${{ matrix.goos }}-${{ matrix.goarch }}
-        asset_name: custom-jwt-issuer-${{ matrix.goos }}-${{ matrix.goarch }}
-        asset_content_type: application/octet-stream
+        tag_name: ${{ github.ref }} # Use the full ref (e.g., refs/tags/v0.0.3)
+        name: Release ${{ github.ref_name }} # Use just the tag name (e.g., v0.0.3)
+        body_path: RELEASE_BODY.md # Use the file we generated for the release body
+        draft: false
+        prerelease: false
+        # The 'assets' input takes a glob pattern or a list of paths
+        assets: ./release_assets/* # Upload all files downloaded into release_assets directory
