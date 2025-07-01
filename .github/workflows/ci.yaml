@@ -40,7 +40,7 @@ jobs:
           path: coverage.txt
 
       - name: Download previous coverage artifact
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
         uses: dawidd6/action-download-artifact@v6
         with:
           workflow: ci.yaml
@@ -50,7 +50,7 @@ jobs:
         continue-on-error: true
 
       - name: Compare coverage with previous
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
         run: |
           prev_cov=0
           if [ -f prev_coverage/coverage.txt ]; then
