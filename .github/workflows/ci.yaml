@@ -41,7 +41,7 @@ jobs:
 
       - name: Download previous coverage artifact
         if: github.event_name == 'pull_request' && github.base_ref == 'main'
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v11
         with:
           workflow: ci.yaml
           name: coverage
