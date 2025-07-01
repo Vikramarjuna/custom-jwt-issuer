@@ -5,15 +5,63 @@ on:
     tags:
       - 'v*.*.*' # Trigger on new tags (e.g., v1.0.0) for releases
 
+# TOP-LEVEL PERMISSIONS for all jobs (unless overridden)
+permissions:
+  contents: read # Allow reading repository content for checkout
+  packages: write # To push Docker images (if GHCR is used)
+  # 'contents: write' is explicitly set where needed for creating/updating releases
+
 jobs:
-  # Job 1: Build and Push Multi-arch Docker Image
-  build-docker-image:
+  # Job 1: Get Version and Create Initial GitHub Release
+  create-github-release:
     runs-on: ubuntu-latest
     permissions:
-      packages: write # To push Docker images to GitHub Packages (important for GHCR)
-      contents: read # Only read permission needed here, as it's not creating release
+      contents: write # Needs write permission to create release
     outputs:
-      build_version: ${{ steps.get_version.outputs.BUILD_VERSION }} # Output version for later use
+      upload_url: ${{ steps.create_release.outputs.upload_url }} # Output the upload URL for asset upload
+      build_version: ${{ steps.get_version_info.outputs.BUILD_VERSION }} # Output BUILD_VERSION
+      lower_repo_path: ${{ steps.get_version_info.outputs.LOWER_REPO_PATH }} # Output LOWER_REPO_PATH
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4 # This step needs read access
+
+    - name: Get tag and repo info
+      id: get_version_info # Assign an ID to this step to reference its outputs
+      run: |
+        # Get the tag name from github.ref, removing "refs/tags/" prefix
+        VERSION=$(echo "${{ github.ref }}" | sed 's/^refs\/tags\///')
+        echo "BUILD_VERSION=$VERSION" >> $GITHUB_OUTPUT # Make it an output
+
+        # Convert repository name to lowercase for GHCR compatibility
+        LOWER_REPO_PATH=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+        echo "LOWER_REPO_PATH=$LOWER_REPO_PATH" >> $GITHUB_OUTPUT # Make it an output
+
+    - name: Create GitHub Release (initial empty release)
+      if: startsWith(github.ref, 'refs/tags/v') # Only run if a tag pushed
+      id: create_release # Assign an ID to this step to reference its outputs
+      uses: actions/create-release@v1 # Use this action to get upload_url
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }} # Use the full ref (e.g., refs/tags/v0.0.3)
+        release_name: Release ${{ steps.get_version_info.outputs.BUILD_VERSION }} # Display name (e.g., Release v0.0.3)
+        body: |
+          Automated release for ${{ steps.get_version_info.outputs.BUILD_VERSION }}.
+          
+          Release notes will be updated after build completion.
+        draft: false
+        prerelease: false
+
+  # Job 2: Build and Push Multi-arch Docker Image
+  build-docker-image:
+    runs-on: ubuntu-latest
+    needs: create-github-release # Depends on release being created to get outputs
+    permissions:
+      contents: read # Needs read access for checkout (for Dockerfile context)
+      packages: write # To push Docker images to GitHub Packages
+    outputs:
+      docker_tags_pushed: true # Simple output to indicate Docker push success
 
     steps:
     - name: Checkout code
@@ -28,22 +76,22 @@ jobs:
     - name: Login to GitHub Container Registry (GHCR)
       uses: docker/login-action@v3
       with:
-        registry: ghcr.io # Specify GHCR registry
-        username: ${{ github.actor }} # Use GitHub actor (your username)
-        password: ${{ secrets.GITHUB_TOKEN }} # Use the built-in GITHUB_TOKEN for GHCR auth
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Get tag and lowercase repo name
-      id: get_version_and_repo
+    - name: Prepare Docker Tags String
+      id: prepare_docker_tags
       run: |
-        # Get the tag name from github.ref, removing "refs/tags/" prefix
-        TAG_NAME=$(echo "${{ github.ref }}" | sed 's/^refs\/tags\///')
-        echo "BUILD_VERSION=$TAG_NAME" >> $GITHUB_ENV
-        echo "BUILD_VERSION=$TAG_NAME" >> "$GITHUB_OUTPUT"
-
-        # Convert repository name to lowercase
-        LOWER_REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-        echo "LOWER_REPO_NAME=$LOWER_REPO" >> $GITHUB_ENV
-        echo "LOWER_REPO_NAME=$LOWER_REPO" >> "$GITHUB_OUTPUT" # Also make it available as a job output
+        LOWER_REPO="${{ needs.create-github-release.outputs.lower_repo_path }}"
+        BUILD_VERSION="${{ needs.create-github-release.outputs.build_version }}"
+        
+        # Construct the full tags string with explicit newlines
+        echo "FULL_DOCKER_TAGS<<EOF" >> "$GITHUB_OUTPUT"
+        echo "ghcr.io/$LOWER_REPO:latest" >> "$GITHUB_OUTPUT"
+        echo "ghcr.io/$LOWER_REPO:$BUILD_VERSION" >> "$GITHUB_OUTPUT"
+        echo "ghcr.io/$LOWER_REPO:${{ github.sha }}" >> "$GITHUB_OUTPUT" # Use raw github.sha for this tag
+        echo "EOF" >> "$GITHUB_OUTPUT"
 
     - name: Build and Push Multi-arch Docker Image to GHCR
       uses: docker/build-push-action@v5
@@ -51,47 +99,37 @@ jobs:
         context: .
         platforms: linux/amd64,linux/arm64
         push: true
-        # Use github.repository which already includes owner/repo-name
-        tags:
-          ghcr.io/${{ env.LOWER_REPO_NAME }}:latest
-          ghcr.io/${{ env.LOWER_REPO_NAME }}:${{ env.BUILD_VERSION }}
-          ghcr.io/${{ env.LOWER_REPO_NAME }}:${{ github.sha }} # Optionally push with full SHA as well
+        tags: ${{ steps.prepare_docker_tags.outputs.FULL_DOCKER_TAGS }}
+        # Note: You can add --provenance=false if you face issues with provenance on GHCR for these tags
+        # and prefer not to deal with it now.
 
-  # Job 2: Build and Upload Binaries for All Platforms (Matrix) as artifacts
+  # Job 3: Build and Upload Binaries for All Platforms (Matrix)
   build-binaries:
     runs-on: ${{ matrix.os }}
-    needs: build-docker-image # Ensure docker image build starts before or concurrently
+    needs: create-github-release # Depends on release being created to get upload_url
     permissions:
-      contents: read # Only read permission needed, we'll upload artifacts
+      contents: write # To upload assets to the release (via upload-release-asset)
 
     strategy:
       fail-fast: false # Allow all matrix jobs to complete even if one fails
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        goos: [linux, darwin]
-        goarch: [amd64, arm64]
-        # Include specific combinations to avoid redundant builds (e.g., darwin/amd64 on ubuntu)
-        # Note: macOS runners can build darwin/amd64 and darwin/arm64.
-        # Linux runners can build linux/amd64 and linux/arm64.
-        # Cross-compiling for macOS on Linux or vice-versa requires more complex toolchains
-        # so it's best to build on native OS where possible for host OS targets.
-        include:
+        include: # Only list the specific combinations you want to run
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
-            asset_name_suffix: linux-amd64
+            asset_suffix: linux-amd64
           - os: ubuntu-latest
             goos: linux
             goarch: arm64
-            asset_name_suffix: linux-arm64
+            asset_suffix: linux-arm64
           - os: macos-latest
             goos: darwin
             goarch: amd64
-            asset_name_suffix: darwin-amd64
+            asset_suffix: darwin-amd64
           - os: macos-latest
             goos: darwin
             goarch: arm64
-            asset_name_suffix: darwin-arm64
+            asset_suffix: darwin-arm64
 
     steps:
     - name: Checkout code
@@ -104,62 +142,80 @@ jobs:
 
     - name: Build Binary (${{ matrix.goos }}/${{ matrix.goarch }})
       run: |
-        BINARY_NAME="custom-jwt-issuer-${{ matrix.asset_name_suffix }}"
-        # For macOS arm64 (Apple Silicon), need to set GOARCH to arm64 and build on macos-latest
+        BINARY_NAME="custom-jwt-issuer-${{ matrix.asset_suffix }}"
         CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o $BINARY_NAME .
-        echo "Built $BINARY_NAME"
       working-directory: ./
 
-    - name: Upload Binary as Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: custom-jwt-issuer-${{ matrix.asset_name_suffix }} # Unique name for each artifact
-        path: ./custom-jwt-issuer-${{ matrix.asset_name_suffix }}
-        # Retention days can be set to save space, default is 90 days.
-        retention-days: 7
-
-  # Job 3: Create GitHub Release and Upload Assets
-  create-github-release:
-    runs-on: ubuntu-latest
-    needs: [build-docker-image, build-binaries] # This job depends on both previous jobs finishing
-    permissions:
-      contents: write # Required to create/update releases
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4 # Needed for access to RELEASE_BODY.md if you choose to create it
-
-    - name: Download all Binary Artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: ./release_assets # All artifacts will be downloaded into this directory
-
-    - name: List Downloaded Artifacts (for debugging)
-      run: ls -R ./release_assets
-
-    - name: Generate Release Body
-      id: generate_body
-      run: |
-        RELEASE_TAG="${{ github.ref_name }}" # e.g., v0.0.3
-        echo "Automated release for version $RELEASE_TAG." > RELEASE_BODY.md
-        echo "" >> RELEASE_BODY.md
-        echo "This release includes:" >> RELEASE_BODY.md
-        echo "* Multi-architecture Docker images (Linux/amd64, Linux/arm64) pushed to GitHub Container Registry." >> RELEASE_BODY.md
-        echo "* CLI binaries for Linux (amd64, arm64) and macOS (amd64, arm64) attached as assets." >> RELEASE_BODY.md
-        echo "" >> RELEASE_BODY.md
-        echo "For detailed changes, please refer to the commit history." >> RELEASE_BODY.md
-      # The shell parameter from your original error is unnecessary here for simple echo commands
-      # shell: /usr/bin/bash -e {0} # This line was the root cause of your initial error
-
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2 # Use v2 for better features and maintenance
+    - name: Upload Binary Asset (${{ matrix.goos }}/${{ matrix.goarch }})
+      if: startsWith(github.ref, 'refs/tags/v') # Only upload if a tag pushed
+      uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ github.ref }} # Use the full ref (e.g., refs/tags/v0.0.3)
-        name: Release ${{ github.ref_name }} # Use just the tag name (e.g., v0.0.3)
-        body_path: RELEASE_BODY.md # Use the file we generated for the release body
-        draft: false
-        prerelease: false
-        # The 'assets' input takes a glob pattern or a list of paths
-        assets: ./release_assets/* # Upload all files downloaded into release_assets directory
+        upload_url: ${{ needs.create-github-release.outputs.upload_url }} # Get URL from create-release job
+        asset_path: ./custom-jwt-issuer-${{ matrix.goos }}-${{ matrix.goarch }}
+        asset_name: custom-jwt-issuer-${{ matrix.goos }}-${{ matrix.goarch }}
+        asset_content_type: application/octet-stream
+
+  # Job 4: Finalize Release Notes
+  finalize-release:
+    runs-on: ubuntu-latest
+    needs: [build-docker-image, build-binaries] # This job depends on both previous build jobs finishing
+    if: success() && startsWith(github.ref, 'refs/tags/v') # Only run if previous jobs succeeded and it's a tag push
+    permissions:
+      contents: write # Needed to update the release
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Generate Final Release Body
+      id: generate_final_body
+      run: |
+        RELEASE_TAG="${{ github.ref_name }}" # e.g., v0.0.3
+        
+        echo "## Automated release for version $RELEASE_TAG" > FINAL_RELEASE_BODY.md
+        echo "" >> FINAL_RELEASE_BODY.md
+        echo "This release includes:" >> FINAL_RELEASE_BODY.md
+        echo "" >> FINAL_RELEASE_BODY.md
+        echo "- Multi-architecture Docker images (Linux/amd64, Linux/arm64) pushed to GitHub Container Registry." >> FINAL_RELEASE_BODY.md
+        echo "- CLI binaries for Linux (amd64, arm64) and macOS (amd64, arm64) attached as assets." >> FINAL_RELEASE_BODY.md
+        echo "" >> FINAL_RELEASE_BODY.md
+        echo "For detailed changes, please refer to the commit history." >> FINAL_RELEASE_BODY.md
+        
+        # Optionally, fetch some recent commit messages for more detail
+        # LAST_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+        # if [ -n "$LAST_TAG" ]; then
+        #   echo "" >> FINAL_RELEASE_BODY.md
+        #   echo "### Changelog since $LAST_TAG" >> FINAL_RELEASE_BODY.md
+        #   git log --pretty=format:"- %s" "$LAST_TAG"..HEAD >> FINAL_RELEASE_BODY.md
+        # else
+        #   echo "" >> FINAL_RELEASE_BODY.md
+        #   echo "### Initial Release" >> FINAL_RELEASE_BODY.md
+        # fi
+
+
+    - name: Install GitHub CLI
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gh
+
+    - name: Get Release ID
+      id: get_release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Extract tag name from ref, e.g., 'refs/tags/v0.0.1' -> 'v0.0.1'
+        TAG_NAME=$(echo "${{ github.ref }}" | sed 's/^refs\/tags\///')
+        
+        # Use gh cli to get the release ID
+        RELEASE_ID=$(gh release view "$TAG_NAME" --json id -q '.id')
+        echo "RELEASE_ID=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+        echo "Found release ID: $RELEASE_ID for tag $TAG_NAME"
+
+    - name: Update GitHub Release Body
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Use gh cli to edit the release body
+        gh release edit "${{ github.ref_name }}" --body-file FINAL_RELEASE_BODY.md
