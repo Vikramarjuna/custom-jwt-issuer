@@ -32,13 +32,18 @@ jobs:
         username: ${{ github.actor }} # Use GitHub actor (your username)
         password: ${{ secrets.GITHUB_TOKEN }} # Use the built-in GITHUB_TOKEN for GHCR auth
 
-    - name: Get tag or short SHA
-      id: get_version
+    - name: Get tag and lowercase repo name
+      id: get_version_and_repo
       run: |
         # Get the tag name from github.ref, removing "refs/tags/" prefix
         TAG_NAME=$(echo "${{ github.ref }}" | sed 's/^refs\/tags\///')
         echo "BUILD_VERSION=$TAG_NAME" >> $GITHUB_ENV
-        echo "BUILD_VERSION=$TAG_NAME" >> "$GITHUB_OUTPUT" # Output for job output
+        echo "BUILD_VERSION=$TAG_NAME" >> "$GITHUB_OUTPUT"
+
+        # Convert repository name to lowercase
+        LOWER_REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+        echo "LOWER_REPO_NAME=$LOWER_REPO" >> $GITHUB_ENV
+        echo "LOWER_REPO_NAME=$LOWER_REPO" >> "$GITHUB_OUTPUT" # Also make it available as a job output
 
     - name: Build and Push Multi-arch Docker Image to GHCR
       uses: docker/build-push-action@v5
@@ -48,9 +53,9 @@ jobs:
         push: true
         # Use github.repository which already includes owner/repo-name
         tags:
-          - 'ghcr.io/${{ github.repository | lower }}:latest'
-          - 'ghcr.io/${{ github.repository | lower }}:${{ env.BUILD_VERSION }}'
-          - 'ghcr.io/${{ github.repository | lower }}:${{ github.sha }}' # Optionally push with full SHA as well
+          ghcr.io/${{ env.LOWER_REPO_NAME }}:latest
+          ghcr.io/${{ env.LOWER_REPO_NAME }}:${{ env.BUILD_VERSION }}
+          ghcr.io/${{ env.LOWER_REPO_NAME }}:${{ github.sha }} # Optionally push with full SHA as well
 
   # Job 2: Build and Upload Binaries for All Platforms (Matrix) as artifacts
   build-binaries:
