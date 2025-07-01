@@ -48,9 +48,9 @@ jobs:
         push: true
         # Use github.repository which already includes owner/repo-name
         tags: |
-          ghcr.io/${{ github.repository | lower }}:latest
-          ghcr.io/${{ github.repository | lower }}:${{ env.BUILD_VERSION }}
-          ghcr.io/${{ github.repository | lower }}:${{ github.sha }} # Optionally push with full SHA as well
+          `ghcr.io/${{ github.repository | lower }}:latest`
+          `ghcr.io/${{ github.repository | lower }}:${{ env.BUILD_VERSION }}`
+          `ghcr.io/${{ github.repository | lower }}:${{ github.sha }}` # Optionally push with full SHA as well
 
   # Job 2: Build and Upload Binaries for All Platforms (Matrix) as artifacts
   build-binaries:
