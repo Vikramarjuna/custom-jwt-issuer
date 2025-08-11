@@ -24,7 +24,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4 # This step needs read access
+      uses: actions/checkout@v5 # This step needs read access
 
     - name: Get tag and repo info
       id: get_version_info # Assign an ID to this step to reference its outputs
@@ -65,7 +65,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Set up QEMU (for multi-arch Docker build)
       uses: docker/setup-qemu-action@v3
@@ -133,7 +133,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Set up Go
       uses: actions/setup-go@v5
@@ -167,7 +167,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Generate Final Release Body
       id: generate_final_body
