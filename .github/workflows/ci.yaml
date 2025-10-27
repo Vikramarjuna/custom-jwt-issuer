@@ -34,7 +34,7 @@ jobs:
           go tool cover -func=coverage.out | grep total: | awk '{print $3}' | sed 's/%//' > coverage.txt
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: coverage
           path: coverage.txt
